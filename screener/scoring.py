@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .cnn import CnnForecast
+from .cnn import CnnAnalystRatings, CnnForecast
 
 
 @dataclass
@@ -26,6 +26,8 @@ class ScoredStock:
     upside_risk_ratio: float
     target_spread_pct: float
     composite_score: float
+    num_analysts: int
+    pct_analyst_buys: float
     last_updated: str | None
 
     def to_dict(self) -> dict:
@@ -40,6 +42,7 @@ def scale_annual_to_months(annual_pct: float, months: float) -> float:
 def score_forecast(
     forecast: CnnForecast,
     *,
+    ratings: CnnAnalystRatings | None = None,
     name: str = "",
     exchange: str = "",
     horizon_months: float = 6.0,
@@ -47,9 +50,13 @@ def score_forecast(
     min_median_upside_1y: float = 15.0,
     max_median_upside_1y: float = 80.0,
     max_downside_1y: float = 15.0,
+    min_analysts: int = 15,
 ) -> ScoredStock | None:
     price = forecast.current_price
     if price < min_price:
+        return None
+
+    if ratings is None or ratings.num_analysts < min_analysts:
         return None
 
     median = forecast.pct_median
@@ -110,6 +117,8 @@ def score_forecast(
         upside_risk_ratio=round(upside_risk_ratio, 2),
         target_spread_pct=round(spread, 2),
         composite_score=round(composite, 2),
+        num_analysts=ratings.num_analysts,
+        pct_analyst_buys=round(ratings.pct_buys, 2),
         last_updated=forecast.last_updated,
     )
 

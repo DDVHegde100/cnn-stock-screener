@@ -1,7 +1,8 @@
-"""Generate HTML and JSON reports from scan results."""
+"""Generate HTML, JSON, and CSV reports from scan results."""
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -11,6 +12,122 @@ from .scanner import ScanResult
 def write_json_report(result: ScanResult, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result.to_dict(), indent=2))
+
+
+def _pick_lookup(result: ScanResult) -> dict[str, dict]:
+    return {p.symbol: p.to_dict() for p in result.top_picks}
+
+
+def write_csv_reports(result: ScanResult, out_dir: Path) -> dict[str, Path]:
+    """Write Google Sheets–ready CSV files. Returns paths written."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    picks = _pick_lookup(result)
+    paths: dict[str, Path] = {}
+
+    summary_path = out_dir / "01_scan_summary.csv"
+    with summary_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["metric", "value"])
+        s = result.portfolio_summary
+        w.writerow(["scan_date_utc", result.scanned_at])
+        w.writerow(["duration_sec", result.duration_sec])
+        w.writerow(["universe_scanned", result.universe_size])
+        w.writerow(["with_cnn_data", result.fetched_count])
+        w.writerow(["qualified_stocks", result.qualified_count])
+        w.writerow(["budget_usd", s["budget"]])
+        w.writerow(["invested_usd", s["invested"]])
+        w.writerow(["cash_remaining_usd", s["cash_remaining"]])
+        w.writerow(["positions", s["positions"]])
+        w.writerow(["expected_6m_return_pct", s["expected_6m_return_pct"]])
+        w.writerow(["expected_6m_profit_usd", s["expected_6m_profit_usd"]])
+    paths["summary"] = summary_path
+
+    buys_path = out_dir / "02_portfolio_buys.csv"
+    buy_fields = [
+        "rank", "symbol", "company", "exchange", "action", "current_price",
+        "shares_to_buy", "weight_pct", "allocation_usd", "actual_invested_usd",
+        "median_target", "high_target", "low_target",
+        "pct_median_1y", "pct_high_1y", "pct_low_1y",
+        "gain_6m_median_pct", "gain_6m_high_pct", "downside_1y_pct",
+        "upside_risk_ratio", "target_spread_pct", "composite_score",
+        "num_analysts", "pct_analyst_buys", "expected_6m_profit_usd", "forecast_last_updated",
+    ]
+    with buys_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=buy_fields)
+        w.writeheader()
+        for line in result.portfolio:
+            p = picks.get(line.symbol, {})
+            w.writerow({
+                "rank": line.rank,
+                "symbol": line.symbol,
+                "company": line.name,
+                "exchange": p.get("exchange", ""),
+                "action": "BUY",
+                "current_price": line.current_price,
+                "shares_to_buy": line.shares,
+                "weight_pct": line.weight_pct,
+                "allocation_usd": line.allocation_usd,
+                "actual_invested_usd": line.actual_invested_usd,
+                "median_target": p.get("median_target", ""),
+                "high_target": p.get("high_target", ""),
+                "low_target": p.get("low_target", ""),
+                "pct_median_1y": p.get("pct_median_1y", ""),
+                "pct_high_1y": p.get("pct_high_1y", ""),
+                "pct_low_1y": p.get("pct_low_1y", ""),
+                "gain_6m_median_pct": line.expected_6m_gain_pct,
+                "gain_6m_high_pct": p.get("gain_6m_high_pct", ""),
+                "downside_1y_pct": p.get("downside_1y_pct", ""),
+                "upside_risk_ratio": p.get("upside_risk_ratio", ""),
+                "target_spread_pct": p.get("target_spread_pct", ""),
+                "composite_score": line.composite_score,
+                "num_analysts": p.get("num_analysts", ""),
+                "pct_analyst_buys": p.get("pct_analyst_buys", ""),
+                "expected_6m_profit_usd": line.expected_6m_profit_usd,
+                "forecast_last_updated": p.get("last_updated", ""),
+            })
+    paths["buys"] = buys_path
+
+    top_path = out_dir / "03_top_picks_all.csv"
+    top_fields = [
+        "rank", "symbol", "company", "exchange", "current_price",
+        "median_target", "high_target", "low_target",
+        "pct_median_1y", "pct_high_1y", "pct_low_1y",
+        "gain_6m_median_pct", "gain_6m_high_pct", "downside_1y_pct",
+        "upside_risk_ratio", "target_spread_pct", "composite_score",
+        "num_analysts", "pct_analyst_buys", "forecast_last_updated", "in_portfolio",
+    ]
+    portfolio_symbols = {line.symbol for line in result.portfolio}
+    with top_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=top_fields)
+        w.writeheader()
+        for i, p in enumerate(result.top_picks, 1):
+            row = p.to_dict()
+            w.writerow({
+                "rank": i,
+                "symbol": row["symbol"],
+                "company": row["name"],
+                "exchange": row["exchange"],
+                "current_price": row["current_price"],
+                "median_target": row["median_target"],
+                "high_target": row["high_target"],
+                "low_target": row["low_target"],
+                "pct_median_1y": row["pct_median_1y"],
+                "pct_high_1y": row["pct_high_1y"],
+                "pct_low_1y": row["pct_low_1y"],
+                "gain_6m_median_pct": row["gain_6m_median_pct"],
+                "gain_6m_high_pct": row["gain_6m_high_pct"],
+                "downside_1y_pct": row["downside_1y_pct"],
+                "upside_risk_ratio": row["upside_risk_ratio"],
+                "target_spread_pct": row["target_spread_pct"],
+                "composite_score": row["composite_score"],
+                "num_analysts": row["num_analysts"],
+                "pct_analyst_buys": row["pct_analyst_buys"],
+                "forecast_last_updated": row["last_updated"],
+                "in_portfolio": "YES" if row["symbol"] in portfolio_symbols else "NO",
+            })
+    paths["top_picks"] = top_path
+
+    return paths
 
 
 def write_html_report(result: ScanResult, path: Path) -> None:

@@ -7,7 +7,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from screener.report import write_html_report, write_json_report
+from screener.report import write_csv_reports, write_html_report, write_json_report
 from screener.scanner import ScanConfig, run_scan
 
 
@@ -21,10 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-upside", type=float, default=15.0, help="Min 1Y median analyst upside %% (default: 15)")
     parser.add_argument("--max-upside", type=float, default=80.0, help="Max 1Y median upside %% — filters outliers (default: 80)")
     parser.add_argument("--max-downside", type=float, default=15.0, help="Max 1Y analyst downside on low target (default: 15)")
+    parser.add_argument("--min-analysts", type=int, default=15, help="Min CNN analyst ratings count (default: 15)")
     parser.add_argument("--min-price", type=float, default=5.0, help="Minimum stock price (default: 5)")
     parser.add_argument("--workers", type=int, default=8, help="Parallel workers (default: 8)")
     parser.add_argument("--delay-ms", type=int, default=120, help="Delay between requests in ms (default: 120)")
     parser.add_argument("--limit", type=int, default=None, help="Limit tickers scanned (for testing)")
+    parser.add_argument("--from-cache", action="store_true", help="Rescore cached data only — no network calls")
     parser.add_argument("--output-dir", type=str, default="output", help="Output directory (default: output)")
     return parser.parse_args()
 
@@ -78,23 +80,32 @@ def main() -> int:
         min_median_upside_1y=args.min_upside,
         max_median_upside_1y=args.max_upside,
         max_downside_1y=args.max_downside,
+        min_analysts=args.min_analysts,
         workers=args.workers,
         request_delay_ms=args.delay_ms,
         limit=args.limit,
+        cache_only=args.from_cache,
         cache_path=out_dir / "forecast_cache.json",
     )
 
     print("Loading ticker universe from NASDAQ...")
-    print(f"Scanning with {config.workers} workers (cached results are reused)...")
+    if args.from_cache:
+        print("Lightweight mode: rescoring from cache only (no API calls)...")
+    else:
+        print(f"Scanning with {config.workers} workers (cached results are reused)...")
 
     result = run_scan(config)
     write_json_report(result, out_dir / "latest_scan.json")
     write_html_report(result, out_dir / "portfolio_report.html")
+    csv_paths = write_csv_reports(result, out_dir / "sheets")
 
     print_portfolio(result)
     print(f"JSON report : {out_dir / 'latest_scan.json'}")
     print(f"HTML report : {out_dir / 'portfolio_report.html'}")
     print(f"Cache file  : {out_dir / 'forecast_cache.json'}")
+    print("Google Sheets CSVs (import each as a tab):")
+    for label, path in csv_paths.items():
+        print(f"  {label:12} {path}")
     return 0
 
 

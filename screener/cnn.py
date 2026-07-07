@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 CNN_FORECAST_URL = "https://production.dataviz.cnn.io/quote/forecast/{symbol}"
+CNN_RATINGS_URL = "https://production.dataviz.cnn.io/quote/analystratings/{symbol}"
 
 HEADERS = {
     "User-Agent": (
@@ -20,6 +21,33 @@ HEADERS = {
     "Origin": "https://www.cnn.com",
     "Referer": "https://www.cnn.com/markets/stocks/",
 }
+
+
+@dataclass
+class CnnAnalystRatings:
+    symbol: str
+    num_analysts: int
+    num_buys: int
+    num_holds: int
+    num_sells: int
+    pct_buys: float
+    pct_holds: float
+    pct_sells: float
+    last_updated: str | None
+
+    @classmethod
+    def from_api_row(cls, row: dict[str, Any]) -> "CnnAnalystRatings":
+        return cls(
+            symbol=row["symbol"],
+            num_analysts=int(row["num_of_analysts"]),
+            num_buys=int(row["num_of_buys"]),
+            num_holds=int(row["num_of_holds"]),
+            num_sells=int(row["num_of_sells"]),
+            pct_buys=float(row["percent_buys"]),
+            pct_holds=float(row["percent_holds"]),
+            pct_sells=float(row["percent_sells"]),
+            last_updated=row.get("last_updated"),
+        )
 
 
 @dataclass
@@ -64,6 +92,37 @@ def fetch_forecast(symbol: str, *, retries: int = 2, retry_delay: float = 0.5) -
             if not row:
                 return None
             return CnnForecast.from_api_row(row)
+        except urllib.error.HTTPError as err:
+            if err.code in {404, 400}:
+                return None
+            if attempt < retries:
+                time.sleep(retry_delay * (attempt + 1))
+                continue
+            return None
+        except (urllib.error.URLError, TimeoutError, KeyError, TypeError, ValueError):
+            if attempt < retries:
+                time.sleep(retry_delay * (attempt + 1))
+                continue
+            return None
+
+    return None
+
+
+def fetch_analyst_ratings(symbol: str, *, retries: int = 2, retry_delay: float = 0.5) -> CnnAnalystRatings | None:
+    url = CNN_RATINGS_URL.format(symbol=symbol)
+    req = urllib.request.Request(
+        url,
+        headers={**HEADERS, "Referer": f"https://www.cnn.com/markets/stocks/{symbol}"},
+    )
+
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                payload = json.loads(resp.read())
+            row = payload[0] if isinstance(payload, list) else payload
+            if not row:
+                return None
+            return CnnAnalystRatings.from_api_row(row)
         except urllib.error.HTTPError as err:
             if err.code in {404, 400}:
                 return None

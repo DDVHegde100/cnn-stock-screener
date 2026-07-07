@@ -34,7 +34,14 @@ def build_portfolio(
     min_positions: int = 30,
 ) -> tuple[list[PortfolioLine], dict]:
     if not picks:
-        return [], {"budget": budget, "invested": 0.0, "cash_remaining": budget}
+        return [], {
+            "budget": budget,
+            "invested": 0.0,
+            "cash_remaining": budget,
+            "positions": 0,
+            "expected_6m_profit_usd": 0.0,
+            "expected_6m_return_pct": 0.0,
+        }
 
     # Use enough candidates so we can fill min_positions after skipping unaffordable names
     candidates = picks[: max(min_positions * 2, len(picks))]

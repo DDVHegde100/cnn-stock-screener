@@ -9,10 +9,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .cnn import fetch_forecast
+from .cnn import CnnAnalystRatings, CnnForecast, fetch_analyst_ratings, fetch_forecast
 from .portfolio import build_portfolio
 from .scoring import ScoredStock, rank_stocks, score_forecast
-from .tickers import TickerInfo, load_all_tickers
+from .tickers import TickerInfo, load_all_tickers, load_ticker_manifest, save_ticker_manifest
 
 try:
     from tqdm import tqdm
@@ -29,9 +29,11 @@ class ScanConfig:
     min_median_upside_1y: float = 15.0
     max_median_upside_1y: float = 80.0
     max_downside_1y: float = 15.0
+    min_analysts: int = 15
     workers: int = 8
     request_delay_ms: int = 120
     limit: int | None = None
+    cache_only: bool = False
     cache_path: Path | None = None
 
 
@@ -75,14 +77,40 @@ def _save_cache(path: Path, cache: dict[str, dict]) -> None:
     path.write_text(json.dumps(cache, indent=2))
 
 
-def _process_ticker(ticker: TickerInfo, config: ScanConfig) -> tuple[str, dict | None, ScoredStock | None]:
-    forecast = fetch_forecast(ticker.symbol)
-    if forecast is None:
-        return ticker.symbol, None, None
+def _normalize_cache_entry(row: dict | None) -> dict | None:
+    if row is None:
+        return None
+    if "forecast" in row:
+        return row
+    if any(k in row for k in ("current_stock_price", "current_price", "median_target")):
+        return {"forecast": row, "ratings": row.get("ratings")}
+    return None
 
-    row = asdict(forecast)
-    scored = score_forecast(
+
+def _entry_forecast(entry: dict) -> CnnForecast | None:
+    fc = entry.get("forecast")
+    if not fc:
+        return None
+    if "current_price" in fc:
+        return CnnForecast(**fc)
+    return CnnForecast.from_api_row(fc)
+
+
+def _entry_ratings(entry: dict) -> CnnAnalystRatings | None:
+    rt = entry.get("ratings")
+    if not rt:
+        return None
+    return CnnAnalystRatings(**rt)
+
+
+def _score_entry(ticker: TickerInfo, entry: dict, config: ScanConfig) -> ScoredStock | None:
+    forecast = _entry_forecast(entry)
+    if forecast is None:
+        return None
+    ratings = _entry_ratings(entry)
+    return score_forecast(
         forecast,
+        ratings=ratings,
         name=ticker.name,
         exchange=ticker.exchange,
         horizon_months=config.horizon_months,
@@ -90,8 +118,27 @@ def _process_ticker(ticker: TickerInfo, config: ScanConfig) -> tuple[str, dict |
         min_median_upside_1y=config.min_median_upside_1y,
         max_median_upside_1y=config.max_median_upside_1y,
         max_downside_1y=config.max_downside_1y,
+        min_analysts=config.min_analysts,
     )
-    return ticker.symbol, row, scored
+
+
+def _process_ticker(ticker: TickerInfo, config: ScanConfig) -> tuple[str, dict | None, ScoredStock | None]:
+    forecast = fetch_forecast(ticker.symbol)
+    if forecast is None:
+        return ticker.symbol, None, None
+
+    ratings = fetch_analyst_ratings(ticker.symbol)
+    entry = {"forecast": asdict(forecast), "ratings": asdict(ratings) if ratings else None}
+    scored = _score_entry(ticker, entry, config)
+    return ticker.symbol, entry, scored
+
+
+def _backfill_ratings(ticker: TickerInfo, entry: dict, config: ScanConfig) -> dict:
+    if entry.get("ratings"):
+        return entry
+    ratings = fetch_analyst_ratings(ticker.symbol)
+    entry = {**entry, "ratings": asdict(ratings) if ratings else None}
+    return entry
 
 
 def run_scan(config: ScanConfig, on_progress=None) -> ScanResult:
@@ -99,36 +146,54 @@ def run_scan(config: ScanConfig, on_progress=None) -> ScanResult:
     cache_path = config.cache_path or Path("output/forecast_cache.json")
     cache = _load_cache(cache_path)
 
-    tickers = load_all_tickers()
+    if config.cache_only:
+        manifest_path = (config.cache_path or Path("output/forecast_cache.json")).parent / "ticker_manifest.json"
+        manifest = load_ticker_manifest(manifest_path)
+        tickers = load_all_tickers(offline_cache=cache, manifest=manifest)
+    else:
+        tickers = load_all_tickers()
+        manifest_path = (config.cache_path or Path("output/forecast_cache.json")).parent / "ticker_manifest.json"
+        save_ticker_manifest(tickers, manifest_path)
     if config.limit:
         tickers = tickers[: config.limit]
 
     universe_size = len(tickers)
-    to_fetch = [t for t in tickers if t.symbol not in cache]
+    to_fetch = [] if config.cache_only else [t for t in tickers if t.symbol not in cache]
     cached_hits = [t for t in tickers if t.symbol in cache]
 
     scored: list[ScoredStock] = []
     errors = 0
     fetched_count = len(cached_hits)
 
-    # Rescore cached entries
+    # Rescore cached entries; backfill missing analyst ratings from CNN API
+    needs_ratings = []
     for ticker in cached_hits:
-        row = cache[ticker.symbol]
-        if row is None:
-            continue
-        from .cnn import CnnForecast
+        entry = _normalize_cache_entry(cache.get(ticker.symbol))
+        if entry and not entry.get("ratings"):
+            needs_ratings.append(ticker)
 
-        forecast = CnnForecast(**row)
-        hit = score_forecast(
-            forecast,
-            name=ticker.name,
-            exchange=ticker.exchange,
-            horizon_months=config.horizon_months,
-            min_price=config.min_price,
-            min_median_upside_1y=config.min_median_upside_1y,
-            max_median_upside_1y=config.max_median_upside_1y,
-            max_downside_1y=config.max_downside_1y,
-        )
+    for ticker in cached_hits:
+        entry = _normalize_cache_entry(cache.get(ticker.symbol))
+        if entry is None:
+            continue
+        cache[ticker.symbol] = entry
+
+    if needs_ratings:
+        with ThreadPoolExecutor(max_workers=config.workers) as pool:
+            futures = {pool.submit(_backfill_ratings, t, cache[t.symbol], config): t for t in needs_ratings}
+            for future in as_completed(futures):
+                ticker = futures[future]
+                try:
+                    cache[ticker.symbol] = future.result()
+                except Exception:
+                    errors += 1
+        _save_cache(cache_path, cache)
+
+    for ticker in cached_hits:
+        entry = _normalize_cache_entry(cache.get(ticker.symbol))
+        if entry is None:
+            continue
+        hit = _score_entry(ticker, entry, config)
         if hit:
             scored.append(hit)
 

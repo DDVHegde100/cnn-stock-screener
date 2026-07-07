@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 OTHER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -65,8 +67,53 @@ def _is_common_equity(symbol: str, name: str, *, etf: str, test_issue: str) -> b
     return True
 
 
-def load_all_tickers() -> list[TickerInfo]:
+def save_ticker_manifest(tickers: list[TickerInfo], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {t.symbol: {"name": t.name, "exchange": t.exchange} for t in tickers}
+    path.write_text(json.dumps(data, indent=2))
+
+
+def load_ticker_manifest(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _cache_has_forecast(row: dict | None) -> dict | None:
+    if row is None:
+        return None
+    if "forecast" in row:
+        return row["forecast"]
+    if any(k in row for k in ("current_stock_price", "current_price", "median_target")):
+        return row
+    return None
+
+
+def load_tickers_from_cache(cache: dict[str, dict], manifest: dict[str, dict] | None = None) -> list[TickerInfo]:
+    """Build ticker list from cached forecast keys — no network."""
+    manifest = manifest or {}
+    tickers = []
+    for symbol, row in sorted(cache.items()):
+        fc = _cache_has_forecast(row)
+        if fc is None:
+            continue
+        sym = fc.get("symbol", symbol)
+        meta = manifest.get(sym, {})
+        tickers.append(TickerInfo(
+            symbol=sym,
+            name=meta.get("name") or sym,
+            exchange=meta.get("exchange", ""),
+        ))
+    return tickers
+
+
+def load_all_tickers(*, offline_cache: dict[str, dict] | None = None, manifest: dict[str, dict] | None = None) -> list[TickerInfo]:
     """Return deduplicated common-stock tickers sorted alphabetically."""
+    if offline_cache is not None:
+        return load_tickers_from_cache(offline_cache, manifest)
     seen: set[str] = set()
     tickers: list[TickerInfo] = []
 
