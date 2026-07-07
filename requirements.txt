@@ -1,0 +1,2 @@
+# Optional — progress bar only; screener runs fine without it
+tqdm>=4.66.0
