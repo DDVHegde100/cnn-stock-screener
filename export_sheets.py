@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export Google Sheets CSVs from an existing latest_scan.json (no scan needed)."""
+"""Export Google Sheets CSVs from latest_scan.json including ASR fields."""
 
 from __future__ import annotations
 
