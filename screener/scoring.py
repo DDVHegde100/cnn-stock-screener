@@ -1,4 +1,4 @@
-"""Score stocks by CNN analyst upside vs downside for a 6-month horizon."""
+"""Score stocks using multi-source analyst consensus and ASR rating."""
 
 from __future__ import annotations
 
@@ -6,6 +6,10 @@ import math
 from dataclasses import dataclass
 
 from .cnn import CnnAnalystRatings, CnnForecast
+from .consensus import build_consensus
+from .finviz import FinvizForecast
+from .rating import compute_asr
+from .utils import scale_annual_to_months
 
 
 @dataclass
@@ -28,21 +32,26 @@ class ScoredStock:
     composite_score: float
     num_analysts: int
     pct_analyst_buys: float
+    finviz_target: float | None
+    finviz_upside_pct: float | None
+    finviz_recom: float | None
+    consensus_upside_pct: float
+    source_agreement_pct: float
+    sources_available: int
+    asr_score: float
+    asr_grade: str
+    asr_label: str
     last_updated: str | None
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
 
 
-def scale_annual_to_months(annual_pct: float, months: float) -> float:
-    """Scale a 12-month analyst return to a shorter holding period (sqrt-time)."""
-    return annual_pct * math.sqrt(months / 12.0)
-
-
 def score_forecast(
     forecast: CnnForecast,
     *,
     ratings: CnnAnalystRatings | None = None,
+    finviz: FinvizForecast | None = None,
     name: str = "",
     exchange: str = "",
     horizon_months: float = 6.0,
@@ -51,6 +60,8 @@ def score_forecast(
     max_median_upside_1y: float = 80.0,
     max_downside_1y: float = 15.0,
     min_analysts: int = 15,
+    min_asr: float = 65.0,
+    min_source_agreement: float = 60.0,
 ) -> ScoredStock | None:
     price = forecast.current_price
     if price < min_price:
@@ -70,15 +81,23 @@ def score_forecast(
     if downside > max_downside_1y:
         return None
 
-    gain_6m_median = scale_annual_to_months(median, horizon_months)
+    consensus_cmp = build_consensus(forecast, ratings, finviz)
+    effective_upside = consensus_cmp.consensus_upside_pct
+
+    gain_6m_median = scale_annual_to_months(effective_upside, horizon_months)
     gain_6m_high = scale_annual_to_months(high, horizon_months)
 
     if gain_6m_median <= 0:
         return None
 
-    # Skip likely bad/stale data: all targets identical at extreme upside
     if abs(median - low) < 1 and abs(median - high) < 1 and median > 100:
         return None
+
+    if consensus_cmp.sources_available >= 2:
+        if consensus_cmp.source_agreement_pct < min_source_agreement:
+            return None
+        if not consensus_cmp.bullish_consensus:
+            return None
 
     spread = 0.0
     if forecast.median_target > 0:
@@ -86,19 +105,9 @@ def score_forecast(
 
     upside_risk_ratio = gain_6m_median / (1.0 + downside)
 
-    # Reward positive low target (analysts see no downside), penalize wide disagreement
-    floor_bonus = 12.0 if low >= 0 else max(0.0, 12.0 - downside)
-    spread_penalty = max(0.0, spread - 60.0) * 0.15
-
-    # Higher upside, higher ceiling, lower downside, tighter analyst range → better score
-    composite = (
-        gain_6m_median * 0.40
-        + gain_6m_high * 0.12
-        + upside_risk_ratio * 6.0
-        + floor_bonus * 0.35
-        + max(0.0, 50.0 - spread) * 0.08
-        - spread_penalty
-    )
+    asr = compute_asr(forecast, ratings, consensus_cmp, finviz, horizon_months=horizon_months)
+    if asr.score < min_asr:
+        return None
 
     return ScoredStock(
         symbol=forecast.symbol,
@@ -116,12 +125,21 @@ def score_forecast(
         downside_1y_pct=round(downside, 2),
         upside_risk_ratio=round(upside_risk_ratio, 2),
         target_spread_pct=round(spread, 2),
-        composite_score=round(composite, 2),
+        composite_score=asr.score,
         num_analysts=ratings.num_analysts,
         pct_analyst_buys=round(ratings.pct_buys, 2),
+        finviz_target=round(finviz.target_price, 2) if finviz and finviz.target_price else None,
+        finviz_upside_pct=finviz.upside_pct if finviz else None,
+        finviz_recom=finviz.recommendation if finviz else None,
+        consensus_upside_pct=consensus_cmp.consensus_upside_pct,
+        source_agreement_pct=consensus_cmp.source_agreement_pct,
+        sources_available=consensus_cmp.sources_available,
+        asr_score=asr.score,
+        asr_grade=asr.grade,
+        asr_label=asr.label,
         last_updated=forecast.last_updated,
     )
 
 
 def rank_stocks(scored: list[ScoredStock], top_n: int = 30) -> list[ScoredStock]:
-    return sorted(scored, key=lambda s: s.composite_score, reverse=True)[:top_n]
+    return sorted(scored, key=lambda s: s.asr_score, reverse=True)[:top_n]
