@@ -50,6 +50,9 @@ def write_csv_reports(result: ScanResult, out_dir: Path) -> dict[str, Path]:
         "pct_median_1y", "pct_high_1y", "pct_low_1y",
         "gain_6m_median_pct", "gain_6m_high_pct", "downside_1y_pct",
         "upside_risk_ratio", "target_spread_pct", "composite_score",
+        "finviz_target", "finviz_upside_pct", "finviz_recom",
+        "consensus_upside_pct", "source_agreement_pct", "sources_available",
+        "asr_score", "asr_grade", "asr_label",
         "num_analysts", "pct_analyst_buys", "expected_6m_profit_usd", "forecast_last_updated",
     ]
     with buys_path.open("w", newline="", encoding="utf-8") as f:
@@ -80,6 +83,15 @@ def write_csv_reports(result: ScanResult, out_dir: Path) -> dict[str, Path]:
                 "upside_risk_ratio": p.get("upside_risk_ratio", ""),
                 "target_spread_pct": p.get("target_spread_pct", ""),
                 "composite_score": line.composite_score,
+                "finviz_target": p.get("finviz_target", ""),
+                "finviz_upside_pct": p.get("finviz_upside_pct", ""),
+                "finviz_recom": p.get("finviz_recom", ""),
+                "consensus_upside_pct": p.get("consensus_upside_pct", ""),
+                "source_agreement_pct": p.get("source_agreement_pct", ""),
+                "sources_available": p.get("sources_available", ""),
+                "asr_score": p.get("asr_score", ""),
+                "asr_grade": p.get("asr_grade", ""),
+                "asr_label": p.get("asr_label", ""),
                 "num_analysts": p.get("num_analysts", ""),
                 "pct_analyst_buys": p.get("pct_analyst_buys", ""),
                 "expected_6m_profit_usd": line.expected_6m_profit_usd,
@@ -94,6 +106,9 @@ def write_csv_reports(result: ScanResult, out_dir: Path) -> dict[str, Path]:
         "pct_median_1y", "pct_high_1y", "pct_low_1y",
         "gain_6m_median_pct", "gain_6m_high_pct", "downside_1y_pct",
         "upside_risk_ratio", "target_spread_pct", "composite_score",
+        "finviz_target", "finviz_upside_pct", "finviz_recom",
+        "consensus_upside_pct", "source_agreement_pct", "sources_available",
+        "asr_score", "asr_grade", "asr_label",
         "num_analysts", "pct_analyst_buys", "forecast_last_updated", "in_portfolio",
     ]
     portfolio_symbols = {line.symbol for line in result.portfolio}
@@ -120,6 +135,15 @@ def write_csv_reports(result: ScanResult, out_dir: Path) -> dict[str, Path]:
                 "upside_risk_ratio": row["upside_risk_ratio"],
                 "target_spread_pct": row["target_spread_pct"],
                 "composite_score": row["composite_score"],
+                "finviz_target": row.get("finviz_target", ""),
+                "finviz_upside_pct": row.get("finviz_upside_pct", ""),
+                "finviz_recom": row.get("finviz_recom", ""),
+                "consensus_upside_pct": row.get("consensus_upside_pct", ""),
+                "source_agreement_pct": row.get("source_agreement_pct", ""),
+                "sources_available": row.get("sources_available", ""),
+                "asr_score": row.get("asr_score", ""),
+                "asr_grade": row.get("asr_grade", ""),
+                "asr_label": row.get("asr_label", ""),
                 "num_analysts": row["num_analysts"],
                 "pct_analyst_buys": row["pct_analyst_buys"],
                 "forecast_last_updated": row["last_updated"],
@@ -150,22 +174,24 @@ def write_html_report(result: ScanResult, path: Path) -> None:
           <td>{line.composite_score:.1f}</td>
         </tr>"""
 
+    pick_lookup = _pick_lookup(result)
     pick_rows = ""
     for i, p in enumerate(result.top_picks, 1):
+        fv_tgt = f"${p.finviz_target:,.2f}" if p.finviz_target else "—"
+        fv_up = f"+{p.finviz_upside_pct:.1f}%" if p.finviz_upside_pct is not None else "—"
         pick_rows += f"""
         <tr>
           <td>{i}</td>
           <td><strong>{p.symbol}</strong></td>
           <td>${p.current_price:,.2f}</td>
           <td>${p.median_target:,.2f}</td>
-          <td>${p.high_target:,.2f}</td>
-          <td>${p.low_target:,.2f}</td>
+          <td>{fv_tgt}</td>
           <td class="green">+{p.pct_median_1y:.1f}%</td>
-          <td class="green">+{p.pct_high_1y:.1f}%</td>
-          <td class="{'red' if p.pct_low_1y < 0 else 'green'}">{p.pct_low_1y:+.1f}%</td>
+          <td class="green">{fv_up}</td>
+          <td>{p.source_agreement_pct:.0f}%</td>
           <td class="green">+{p.gain_6m_median_pct:.1f}%</td>
-          <td>{p.upside_risk_ratio:.2f}</td>
-          <td>{p.composite_score:.1f}</td>
+          <td><strong>{p.asr_score:.1f}</strong> ({p.asr_grade})</td>
+          <td>{p.asr_label}</td>
         </tr>"""
 
     summary = result.portfolio_summary
@@ -199,8 +225,8 @@ def write_html_report(result: ScanResult, path: Path) -> None:
   </style>
 </head>
 <body>
-  <h1>CNN Analyst Stock Screener</h1>
-  <p class="sub">Scanned {result.universe_size:,} tickers · {result.qualified_count} qualified · {result.duration_sec}s · {result.scanned_at[:19]} UTC</p>
+  <h1>Multi-Source Analyst Stock Screener</h1>
+  <p class="sub">CNN + Finviz consensus · ASR proprietary rating · {result.universe_size:,} tickers · {result.qualified_count} qualified · {result.duration_sec}s</p>
 
   <div class="cards">
     <div class="card"><div class="val">${summary['budget']:,.0f}</div><div class="lbl">Budget</div></div>
@@ -222,12 +248,12 @@ def write_html_report(result: ScanResult, path: Path) -> None:
     <tbody>{rows}</tbody>
   </table>
 
-  <h2>Top {len(result.top_picks)} Picks — CNN Analyst Forecasts</h2>
+  <h2>Top {len(result.top_picks)} Picks — Multi-Source Consensus</h2>
   <table>
     <thead>
       <tr>
-        <th>#</th><th>Ticker</th><th>Price</th><th>Median Target</th><th>High Target</th><th>Low Target</th>
-        <th>1Y Median</th><th>1Y High</th><th>1Y Low</th><th>6M Est.</th><th>Upside/Risk</th><th>Score</th>
+        <th>#</th><th>Ticker</th><th>Price</th><th>CNN Target</th><th>Finviz Target</th>
+        <th>CNN Upside</th><th>Finviz Upside</th><th>Agreement</th><th>6M Est.</th><th>ASR</th><th>Label</th>
       </tr>
     </thead>
     <tbody>{pick_rows}</tbody>
