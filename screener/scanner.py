@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .cnn import CnnAnalystRatings, CnnForecast, fetch_analyst_ratings, fetch_forecast
+from .finviz import FinvizForecast, fetch_finviz_forecast
 from .portfolio import build_portfolio
 from .scoring import ScoredStock, rank_stocks, score_forecast
 from .tickers import TickerInfo, load_all_tickers, load_ticker_manifest, save_ticker_manifest
@@ -30,6 +31,8 @@ class ScanConfig:
     max_median_upside_1y: float = 80.0
     max_downside_1y: float = 15.0
     min_analysts: int = 15
+    min_asr: float = 65.0
+    min_source_agreement: float = 60.0
     workers: int = 8
     request_delay_ms: int = 120
     limit: int | None = None
@@ -81,9 +84,13 @@ def _normalize_cache_entry(row: dict | None) -> dict | None:
     if row is None:
         return None
     if "forecast" in row:
-        return row
+        return {
+            "forecast": row["forecast"],
+            "ratings": row.get("ratings"),
+            "finviz": row.get("finviz"),
+        }
     if any(k in row for k in ("current_stock_price", "current_price", "median_target")):
-        return {"forecast": row, "ratings": row.get("ratings")}
+        return {"forecast": row, "ratings": row.get("ratings"), "finviz": row.get("finviz")}
     return None
 
 
@@ -103,14 +110,21 @@ def _entry_ratings(entry: dict) -> CnnAnalystRatings | None:
     return CnnAnalystRatings(**rt)
 
 
+def _entry_finviz(entry: dict) -> FinvizForecast | None:
+    fv = entry.get("finviz")
+    if not fv:
+        return None
+    return FinvizForecast(**fv)
+
+
 def _score_entry(ticker: TickerInfo, entry: dict, config: ScanConfig) -> ScoredStock | None:
     forecast = _entry_forecast(entry)
     if forecast is None:
         return None
-    ratings = _entry_ratings(entry)
     return score_forecast(
         forecast,
-        ratings=ratings,
+        ratings=_entry_ratings(entry),
+        finviz=_entry_finviz(entry),
         name=ticker.name,
         exchange=ticker.exchange,
         horizon_months=config.horizon_months,
@@ -119,6 +133,8 @@ def _score_entry(ticker: TickerInfo, entry: dict, config: ScanConfig) -> ScoredS
         max_median_upside_1y=config.max_median_upside_1y,
         max_downside_1y=config.max_downside_1y,
         min_analysts=config.min_analysts,
+        min_asr=config.min_asr,
+        min_source_agreement=config.min_source_agreement,
     )
 
 
@@ -128,17 +144,28 @@ def _process_ticker(ticker: TickerInfo, config: ScanConfig) -> tuple[str, dict |
         return ticker.symbol, None, None
 
     ratings = fetch_analyst_ratings(ticker.symbol)
-    entry = {"forecast": asdict(forecast), "ratings": asdict(ratings) if ratings else None}
+    finviz = fetch_finviz_forecast(ticker.symbol)
+    entry = {
+        "forecast": asdict(forecast),
+        "ratings": asdict(ratings) if ratings else None,
+        "finviz": asdict(finviz) if finviz else None,
+    }
     scored = _score_entry(ticker, entry, config)
     return ticker.symbol, entry, scored
 
 
-def _backfill_ratings(ticker: TickerInfo, entry: dict, config: ScanConfig) -> dict:
-    if entry.get("ratings"):
-        return entry
-    ratings = fetch_analyst_ratings(ticker.symbol)
-    entry = {**entry, "ratings": asdict(ratings) if ratings else None}
+def _backfill_entry(ticker: TickerInfo, entry: dict) -> dict:
+    if not entry.get("ratings"):
+        ratings = fetch_analyst_ratings(ticker.symbol)
+        entry = {**entry, "ratings": asdict(ratings) if ratings else None}
+    if not entry.get("finviz"):
+        finviz = fetch_finviz_forecast(ticker.symbol)
+        entry = {**entry, "finviz": asdict(finviz) if finviz else None}
     return entry
+
+
+def _needs_backfill(entry: dict) -> bool:
+    return not entry.get("ratings") or not entry.get("finviz")
 
 
 def run_scan(config: ScanConfig, on_progress=None) -> ScanResult:
@@ -165,12 +192,11 @@ def run_scan(config: ScanConfig, on_progress=None) -> ScanResult:
     errors = 0
     fetched_count = len(cached_hits)
 
-    # Rescore cached entries; backfill missing analyst ratings from CNN API
-    needs_ratings = []
+    needs_backfill = []
     for ticker in cached_hits:
         entry = _normalize_cache_entry(cache.get(ticker.symbol))
-        if entry and not entry.get("ratings"):
-            needs_ratings.append(ticker)
+        if entry and _needs_backfill(entry):
+            needs_backfill.append(ticker)
 
     for ticker in cached_hits:
         entry = _normalize_cache_entry(cache.get(ticker.symbol))
@@ -178,9 +204,9 @@ def run_scan(config: ScanConfig, on_progress=None) -> ScanResult:
             continue
         cache[ticker.symbol] = entry
 
-    if needs_ratings:
+    if needs_backfill:
         with ThreadPoolExecutor(max_workers=config.workers) as pool:
-            futures = {pool.submit(_backfill_ratings, t, cache[t.symbol], config): t for t in needs_ratings}
+            futures = {pool.submit(_backfill_entry, t, cache[t.symbol]): t for t in needs_backfill}
             for future in as_completed(futures):
                 ticker = futures[future]
                 try:
