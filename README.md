@@ -82,3 +82,5 @@ screener/
 ## Disclaimer
 
 Research tool only — not financial advice.
+\n\n---\n\n**Author:** [Dhruv Hegde](https://github.com/DDVHegde100) · CS @ University of Michigan\n
+**License:** [MIT](LICENSE)
